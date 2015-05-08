@@ -299,7 +299,10 @@ cdef class MCP:
         # but this is my code and I like fortran-style! Also, it's
         # faster when working with image arrays, which are often
         # already fortran-strided.)
-        self.flat_costs = costs.astype(FLOAT_D, copy=False).ravel('F')
+        try:
+            self.flat_costs = costs.astype(FLOAT_D, copy=False).ravel('F')
+        except:
+            self.flat_costs = costs.astype(FLOAT_D).flatten('F')
         size = self.flat_costs.shape[0]
         self.flat_cumulative_costs = np.empty(size, dtype=FLOAT_D)
         self.dim = len(costs.shape)
