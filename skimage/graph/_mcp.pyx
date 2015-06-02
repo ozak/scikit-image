@@ -118,6 +118,51 @@ def _offset_edge_map(shape, offsets):
         neg[neg < mn] = 0
     return pos_edges.astype(EDGE_D), neg_edges.astype(EDGE_D)
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+def _gis_offset_edge_map(shape, offsets):
+    """Return an array with positions marked where offsets will step
+    out of bounds.
+
+    Given a shape (of length n) and a list of n-d offsets, return a two arrays
+    of (n,) + shape: pos_edge_map and neg_edge_map.
+    For each dimension xxx_edge_map[dim, ...] has zeros at indices at which
+    none of the given offsets (in that dimension) of the given sign (positive
+    or negative, respectively) will step out of bounds. If the value is
+    nonzero, it gives the largest offset (in terms of absolute value) that
+    will step out of bounds in that direction.
+
+    An example will be explanatory:
+    >>> offsets = [[-2,0], [1,1], [0,2]]
+    >>> pos_edge_map, neg_edge_map = _offset_edge_map((4,4), offsets)
+    >>> neg_edge_map[0]
+    array([[-1, -1, -1, -1],
+          [-2, -2, -2, -2],
+          [ 0,  0,  0,  0],
+          [ 0,  0,  0,  0]], dtype=int8)
+
+    >>> pos_edge_map[1]
+    array([[0, 0, 2, 1],
+          [0, 0, 2, 1],
+          [0, 0, 2, 1],
+          [0, 0, 2, 1]], dtype=int8)
+
+    """
+    indices = np.indices(shape)  # indices.shape = (n,)+shape
+
+    #get the distance from each index to the upper or lower edge in each dim
+    pos_edges = (shape - indices.T).T
+    neg_edges = -1 - indices
+    # now set the distances to zero if none of the given offsets could reach
+    offsets = np.asarray(offsets)
+    maxes = offsets.max(axis=0)
+    maxes[1] = 0
+    mins = offsets.min(axis=0)
+    mins[1] = 0
+    for pos, neg, mx, mn in zip(pos_edges, neg_edges, maxes, mins):
+        pos[pos > mx] = 0
+        neg[neg < mn] = 0
+    return pos_edges.astype(EDGE_D), neg_edges.astype(EDGE_D)
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
@@ -437,4 +482,533 @@ cdef class MCP:
         ends : iterable, optional
             A list of n-d ending indices.
         find_all_ends : bool, optional
-   
+            If 'True' (default), the minimum-cost-path to every specified
+            end-position will be found; otherwise the algorithm will stop when
+            a a path is found to any end-position. (If no `ends` were
+            specified, then this parameter has no effect.)
+
+        Returns
+        -------
+        cumulative_costs : ndarray
+            Same shape as the `costs` array; this array records the minimum
+            cost path from the nearest/cheapest starting index to each index
+            considered. (If `ends` were specified, not all elements in the
+            array will necessarily be considered: positions not evaluated will
+            have a cumulative cost of inf. If `find_all_ends` is 'False', only
+            one of the specified end-positions will have a finite cumulative
+            cost.)
+        traceback : ndarray
+            Same shape as the `costs` array; this array contains the offset to
+            any given index from its predecessor index. The offset indices
+            index into the `offsets` attribute, which is a array of n-d
+            offsets. In the 2-d case, if offsets[traceback[x, y]] is (-1, -1),
+            that means that the predecessor of [x, y] in the minimum cost path
+            to some start position is [x+1, y+1]. Note that if the
+            offset_index is -1, then the given index was not considered.
+
+        """
+        # basic variables to use for end-finding; also fix up the start and end
+        # lists
+        cdef BOOL_T use_ends = 0
+        cdef INDEX_T num_ends
+        cdef BOOL_T all_ends = find_all_ends
+        cdef INDEX_T[:] flat_ends
+        starts = _normalize_indices(starts, self.costs_shape)
+        if starts is None:
+            raise ValueError('start points must all be within the costs array')
+        elif not starts:
+            raise ValueError('no valid start points to start front' +
+                             'propagation')
+        if ends is not None:
+            ends = _normalize_indices(ends, self.costs_shape)
+            if ends is None:
+                raise ValueError('end points must all be within '
+                                 'the costs array')
+            use_ends = 1
+            num_ends = len(ends)
+            flat_ends = np.array(_ravel_index_fortran(
+                ends, self.costs_shape), dtype=INDEX_D)
+
+        # Always perform a reset to (re)initialize our arrays and start
+        # positions
+        self._starts, self._ends = starts, ends
+        self._reset()
+
+        # Get shorter names for arrays
+        cdef FLOAT_T[:] flat_costs = self.flat_costs
+        cdef FLOAT_T[:] flat_cumulative_costs = self.flat_cumulative_costs
+        cdef OFFSETS_INDEX_T[:] traceback_offsets = self.traceback_offsets
+        cdef EDGE_T[:, :] flat_pos_edge_map = self.flat_pos_edge_map
+        cdef EDGE_T[:, :] flat_neg_edge_map = self.flat_neg_edge_map
+        cdef OFFSET_T[:, :] offsets = self.offsets
+        cdef INDEX_T[:] flat_offsets = self.flat_offsets
+        cdef FLOAT_T[:] offset_lengths = self.offset_lengths
+
+        # Short names for other attributes
+        cdef heap.FastUpdateBinaryHeap costs_heap = self.costs_heap
+        cdef DIM_T dim = self.dim
+        cdef int num_offsets = len(flat_offsets)
+
+        # Variables used during front propagation
+        cdef FLOAT_T cost, new_cost, cumcost, new_cumcost, offset_length
+        cdef INDEX_T index, new_index
+        cdef BOOL_T is_at_edge, use_offset
+        cdef INDEX_T d, i, iter
+        cdef OFFSET_T offset
+        cdef EDGE_T pos_edge_val, neg_edge_val
+        cdef int num_ends_found = 0
+        cdef FLOAT_T inf = np.inf
+        cdef int goal_reached
+
+        cdef INDEX_T maxiter = int(max_coverage * flat_costs.size)
+
+        for iter in range(maxiter):
+
+            # This is rather like a while loop, except we are guaranteed to
+            # exit, which is nice during developing to prevent eternal loops.
+
+            # Find the point with the minimum cost in the heap. Once
+            # popped, this point's minimum cost path has been found.
+            if costs_heap.count == 0:
+                # nothing in the heap: we've found paths to every
+                # point in the array
+                break
+
+            # Get current cumulative cost and index from the heap
+            cumcost = costs_heap.pop_fast()
+            index = costs_heap._popped_ref
+
+            # Record the cost we found to this point
+            flat_cumulative_costs[index] = cumcost
+
+            # Check if goal is reached
+            goal_reached = self.goal_reached(index, cumcost)
+            if goal_reached > 0:
+                if goal_reached == 1:
+                    continue  # Skip neighbours
+                else:
+                    break  # Done completely
+
+            if use_ends:
+                # If we're only tracing out a path to one or more
+                # endpoints, check to see if this is an endpoint, and
+                # if so, if we're done pathfinding.
+                for i in range(num_ends):
+                    if index == flat_ends[i]:
+                        num_ends_found += 1
+                        break
+                if (num_ends_found and not all_ends) or \
+                    num_ends_found == num_ends:
+                    # if we've found one or all of the end points (as
+                    # requested), stop searching
+                    break
+
+            # Look into the edge map to see if this point is at an
+            # edge along any axis
+            is_at_edge = 0
+            for d in range(dim):
+                if (flat_pos_edge_map[d, index] != 0 or
+                    flat_neg_edge_map[d, index] != 0):
+                    is_at_edge = 1
+                    break
+
+            # Now examine the points neighboring the given point
+            for i in range(num_offsets):
+                # First, if we're at some edge, scrutinize the offset
+                # to ensure that it won't put us out-of-bounds. If,
+                # for example, the edge_map at (x, y) is (-1, 0) --
+                # though of course we use flat indexing below -- that
+                # means that (x, y) is along the lower edge of the
+                # array; thus offsets with -1 or more negative in the
+                # x-dimension should not be used!
+                use_offset = 1
+                if is_at_edge:
+                    for d in range(dim):
+                        offset = offsets[i, d]
+                        pos_edge_val = flat_pos_edge_map[d, index]
+                        neg_edge_val = flat_neg_edge_map[d, index]
+                        if (pos_edge_val > 0 and offset >= pos_edge_val) or \
+                           (neg_edge_val < 0 and offset <= neg_edge_val):
+                            # the offset puts us out of bounds...
+                            use_offset = 0
+                            break
+                # If not at an edge, or the specific offset doesn't
+                # push over the edge, then we go on.
+                if not use_offset:
+                    continue
+
+                # using the flat offsets, calculate the new flat index
+                new_index = index + flat_offsets[i]
+
+                # Get offset length
+                offset_length = offset_lengths[i]
+
+                # If we have already found the best path here then
+                # ignore this point
+                if flat_cumulative_costs[new_index] != inf:
+                    # Give subclass the oportunity to examine these two nodes
+                    # Note that only when both nodes are "frozen" their
+                    # cumulative cost is set. By doing the check here, each
+                    # pair of nodes is checked exactly once.
+                    self._examine_neighbor(index, new_index, offset_length)
+                    continue
+
+                # Get cost and new cost
+                cost = flat_costs[index]
+                new_cost = flat_costs[new_index]
+
+                # If the cost at this point is negative or infinite, ignore it
+                if new_cost < 0 or new_cost == inf:
+                    continue
+
+                # Calculate new cumulative cost
+                new_cumcost = cumcost + self._travel_cost(cost, new_cost,
+                                                          offset_length)
+
+                # Now we ask the heap to append or update the cost to
+                # this new point, but only if that point isn't already
+                # in the heap, or it is but the new cost is lower.
+                # don't push infs into the heap though!
+                if new_cumcost != inf:
+                    costs_heap.push_if_lower_fast(new_cumcost, new_index)
+                    # If we did perform an append or update, we should
+                    # record the offset from the predecessor to this new
+                    # point
+                    if costs_heap._pushed:
+                        traceback_offsets[new_index] = i
+                        self._update_node(index, new_index, offset_length)
+
+
+        # Un-flatten the costs and traceback arrays for human consumption.
+        cumulative_costs = np.asarray(flat_cumulative_costs)
+        cumulative_costs = cumulative_costs.reshape(self.costs_shape,
+                                                    order='F')
+        traceback = np.asarray(traceback_offsets)
+        traceback = traceback.reshape(self.costs_shape, order='F')
+        self.dirty = 1
+        return cumulative_costs, traceback
+
+
+    def traceback(self, end):
+        """traceback(end)
+
+        Trace a minimum cost path through the pre-calculated traceback array.
+
+        This convenience function reconstructs the the minimum cost path to a
+        given end position from one of the starting indices provided to
+        find_costs(), which must have been called previously. This function
+        can be called as many times as desired after find_costs() has been
+        run.
+
+        Parameters
+        ----------
+        end : iterable
+            An n-d index into the `costs` array.
+
+        Returns
+        -------
+        traceback : list of n-d tuples
+            A list of indices into the `costs` array, starting with one of
+            the start positions passed to find_costs(), and ending with the
+            given `end` index. These indices specify the minimum-cost path
+            from any given start index to the `end` index. (The total cost
+            of that path can be read out from the `cumulative_costs` array
+            returned by find_costs().)
+        """
+        if not self.dirty:
+            raise Exception('find_costs() must be run before traceback()')
+        ends = _normalize_indices([end], self.costs_shape)
+        if ends is None:
+            raise ValueError('the specified end point must be '
+                             'within the costs array')
+        traceback = [tuple(ends[0])]
+
+        cdef INDEX_T flat_position =\
+             _ravel_index_fortran(ends, self.costs_shape)[0]
+        if self.flat_cumulative_costs[flat_position] == np.inf:
+            raise ValueError('no minimum-cost path was found '
+                             'to the specified end point')
+
+        # Short names for arrays
+        cdef OFFSETS_INDEX_T [:] traceback_offsets = self.traceback_offsets
+        cdef OFFSET_T [:,:] offsets = self.offsets
+        cdef INDEX_T [:] flat_offsets = self.flat_offsets
+        # New array
+        cdef INDEX_T [:] position = np.array(ends[0], dtype=INDEX_D)
+
+        cdef OFFSETS_INDEX_T offset
+        cdef DIM_T d
+        cdef DIM_T dim = self.dim
+        while 1:
+            offset = traceback_offsets[flat_position]
+            if offset == -1:
+                # At a point where we can go no further: probably a start point
+                break
+            flat_position -= flat_offsets[offset]
+            for d in range(dim):
+                position[d] -= offsets[offset, d]
+            traceback.append(tuple(position))
+        return _reverse(traceback)
+
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef class MCP_Geometric(MCP):
+    """MCP_Geometric(costs, offsets=None, fully_connected=True)
+
+    Find distance-weighted minimum cost paths through an n-d costs array.
+
+    See the documentation for MCP for full details. This class differs from
+    MCP in that the cost of a path is not simply the sum of the costs along
+    that path.
+
+    This class instead assumes that the costs array contains at each position
+    the "cost" of a unit distance of travel through that position. For
+    example, a move (in 2-d) from (1, 1) to (1, 2) is assumed to originate in
+    the center of the pixel (1, 1) and terminate in the center of (1, 2). The
+    entire move is of distance 1, half through (1, 1) and half through (1, 2);
+    thus the cost of that move is `(1/2)*costs[1,1] + (1/2)*costs[1,2]`.
+
+    On the other hand, a move from (1, 1) to (2, 2) is along the diagonal and
+    is sqrt(2) in length. Half of this move is within the pixel (1, 1) and the
+    other half in (2, 2), so the cost of this move is calculated as
+    `(sqrt(2)/2)*costs[1,1] + (sqrt(2)/2)*costs[2,2]`.
+
+    These calculations don't make a lot of sense with offsets of magnitude
+    greater than 1. Use the `sampling` argument in order to deal with
+    anisotropic data.
+    """
+
+    def __init__(self, costs, offsets=None, fully_connected=True,
+                 sampling=None):
+        """__init__(costs, offsets=None, fully_connected=True, sampling=None)
+
+        See class documentation.
+        """
+        MCP.__init__(self, costs, offsets, fully_connected, sampling)
+        if np.absolute(self.offsets).max() > 1:
+            raise ValueError('all offset components must be 0, 1, or -1')
+        self.use_start_cost = 0
+
+    cdef FLOAT_T _travel_cost(self, FLOAT_T old_cost, FLOAT_T new_cost,
+                              FLOAT_T offset_length):
+        return offset_length * 0.5 * (old_cost + new_cost)
+
+
+
+@cython.boundscheck(True)
+@cython.wraparound(True)
+cdef class MCP_Connect(MCP):
+    """MCP_Connect(costs, offsets=None, fully_connected=True)
+
+    Connect source points using the distance-weighted minimum cost function.
+
+    A front is grown from each seed point simultaneously, while the
+    origin of the front is tracked as well. When two fronts meet,
+    create_connection() is called. This method must be overloaded to
+    deal with the found edges in a way that is appropriate for the
+    application.
+    """
+
+    cdef INDEX_T [:] flat_idmap
+
+
+    def __init__(self, costs, offsets=None, fully_connected=True,
+                 sampling=None):
+        MCP.__init__(self, costs, offsets, fully_connected, sampling)
+
+        # Create id map to keep track of origin of nodes
+        self.flat_idmap = np.zeros(self.costs_shape, INDEX_D).ravel('F')
+
+
+    def _reset(self):
+        """ Reset the id map.
+        """
+        cdef INDEX_T start
+
+        MCP._reset(self)
+        starts, ends = self._starts, self._ends
+
+        # Reset idmap
+        self.flat_idmap[...] = -1
+        id = 0
+        for start in _ravel_index_fortran(starts, self.costs_shape):
+            self.flat_idmap[start] = id
+            id += 1
+
+
+    cdef FLOAT_T _travel_cost(self, FLOAT_T old_cost, FLOAT_T new_cost,
+                              FLOAT_T offset_length):
+        """ Equivalent to MCP_Geometric.
+        """
+        return offset_length * 0.5 * (old_cost + new_cost)
+
+
+    cdef void _examine_neighbor(self, INDEX_T index, INDEX_T new_index,
+                                FLOAT_T offset_length):
+        """ Check whether two fronts are meeting. If so, the flat_traceback
+        is obtained and a connection is created.
+        """
+
+        # Short names
+        cdef INDEX_T [:] flat_idmap = self.flat_idmap
+        cdef FLOAT_T [:] flat_cumulative_costs = self.flat_cumulative_costs
+
+        # Get ids
+        cdef INDEX_T id1 = flat_idmap[index]
+        cdef INDEX_T id2 = flat_idmap[new_index]
+
+        if id2 < 0 or id1 < 0:
+            pass
+        elif id2 != id1:
+            # We reached the 'front' of another seed point!
+            # Get position/coordinates
+            pos1, pos2 = _unravel_index_fortran([index, new_index],
+                                                self.costs_shape)
+            # Also get the costs, so we can keep the path with the least cost
+            cost1 = flat_cumulative_costs[index]
+            cost2 = flat_cumulative_costs[new_index]
+            # Create connection
+            self.create_connection(id1, id2, pos1, pos2, cost1, cost2)
+
+
+    def create_connection(self, id1, id2, tb1, tb2, cost1, cost2):
+        """ create_connection id1, id2, pos1, pos2, cost1, cost2)
+
+        Overload this method to keep track of the connections that are
+        found during MCP processing. Note that a connection with the
+        same ids can be found multiple times (but with different
+        positions and costs).
+
+        At the time that this method is called, both points are "frozen"
+        and will not be visited again by the MCP algorithm.
+
+        Parameters
+        ----------
+        id1 : int
+            The seed point id where the first neighbor originated from.
+        id2 : int
+            The seed point id where the second neighbor originated from.
+        pos1 : tuple
+            The index of of the first neighbour in the connection.
+        pos2 : tuple
+            The index of of the second neighbour in the connection.
+        cost1 : float
+            The cumulative cost at `pos1`.
+        cost2 : float
+            The cumulative costs at `pos2`.
+        """
+        pass
+
+
+    cdef void _update_node(self, INDEX_T index, INDEX_T new_index,
+                           FLOAT_T offset_length):
+        """ Keep track of the id map so that we know which seed point
+        a certain front originates from.
+        """
+        self.flat_idmap[new_index] = self.flat_idmap[index]
+
+
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef class MCP_Flexible(MCP):
+    """MCP_Flexible(costs, offsets=None, fully_connected=True)
+
+    Find minimum cost paths through an N-d costs array.
+
+    See the documentation for MCP for full details. This class differs from
+    MCP in that several methods can be overloaded (from pure Python) to
+    modify the behavior of the algorithm and/or create custom algorithms
+    based on MCP. Note that goal_reached can also be overloaded in the
+    MCP class.
+
+    """
+
+    def travel_cost(self, FLOAT_T old_cost, FLOAT_T new_cost,
+                    FLOAT_T offset_length):
+        """ travel_cost(old_cost, new_cost, offset_length)
+        This method calculates the travel cost for going from the
+        current node to the next. The default implementation returns
+        new_cost. Overload this method to adapt the behaviour of the
+        algorithm.
+        """
+        return new_cost
+
+
+    def examine_neighbor(self, INDEX_T index, INDEX_T new_index,
+                         FLOAT_T offset_length):
+        """ examine_neighbor(index, new_index, offset_length)
+        This method is called once for every pair of neighboring nodes,
+        as soon as both nodes are frozen.
+
+        This method can be overloaded to obtain information about
+        neightboring nodes, and/or to modify the behavior of the MCP
+        algorithm. One example is the MCP_Connect class, which checks
+        for meeting fronts using this hook.
+        """
+        pass
+
+
+    def update_node(self, INDEX_T index, INDEX_T new_index,
+                    FLOAT_T offset_length):
+        """ update_node(index, new_index, offset_length)
+        This method is called when a node is updated, right after
+        new_index is pushed onto the heap and the traceback map is
+        updated.
+
+        This method can be overloaded to keep track of other arrays
+        that are used by a specific implementation of the algorithm.
+        For instance the MCP_Connect class uses it to update an id map.
+        """
+        pass
+
+
+    cdef FLOAT_T _travel_cost(self, FLOAT_T old_cost, FLOAT_T new_cost,
+                              FLOAT_T offset_length):
+        return self.travel_cost(old_cost, new_cost, offset_length)
+
+
+    cdef void _examine_neighbor(self, INDEX_T index, INDEX_T new_index,
+                                FLOAT_T offset_length):
+        self.examine_neighbor(index, new_index, offset_length)
+
+
+    cdef void _update_node(self, INDEX_T index, INDEX_T new_index,
+                           FLOAT_T offset_length):
+        self.update_node(index, new_index, offset_length)
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef class MCP_GIS(MCP_Geometric):
+    """MCP_GIS(costs, offsets=None, fully_connected=True)
+
+    Find distance-weighted minimum cost paths through an n-d costs array that represents GIS data.
+
+    See the documentation for MCP_Geometric for full details. This class differs from
+    MCP_Geometric in that the left and right borders are connected. 
+    """
+
+    def __init__(self, costs, offsets=None, fully_connected=True,
+                 sampling=None):
+        """__init__(costs, offsets=None, fully_connected=True, sampling=None)
+
+        See class documentation.
+        """
+
+        def __init__(self, costs, offsets=None, fully_connected=True,
+                     sampling=None):
+            """__init__(costs, offsets=None, fully_connected=True, sampling=None)
+
+            See class documentation.
+            """
+            MCP_Geometric.__init__(self, costs, offsets, fully_connected, sampling)
+            pos, neg = _gis_offset_edge_map(costs.shape, self.offsets)
+            size = self.flat_costs.shape[0]
+            self.flat_pos_edge_map = pos.reshape((self.dim, size), order='F')
+            self.flat_neg_edge_map = neg.reshape((self.dim, size), order='F')
+            self.use_start_cost = 0
+            print(pos)
+            print(neg)
+            print(self.flat_pos_edge_map)

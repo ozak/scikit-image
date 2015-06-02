@@ -1,5 +1,5 @@
 from .spath import shortest_path
-from .mcp import MCP, MCP_Geometric, MCP_Connect, MCP_Flexible, route_through_array
+from .mcp import MCP, MCP_Geometric, MCP_Connect, MCP_Flexible, MCP_GIS, route_through_array
 
 
 __all__ = ['shortest_path',
@@ -7,6 +7,7 @@ __all__ = ['shortest_path',
            'MCP_Geometric',
            'MCP_Connect',
            'MCP_Flexible',
+           'MCP_GIS',
            'route_through_array',
            'rag_mean_color',
            'cut_threshold',
