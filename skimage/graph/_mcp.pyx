@@ -1003,12 +1003,9 @@ cdef class MCP_GIS(MCP_Geometric):
 
             See class documentation.
             """
-            MCP_Geometric.__init__(self, costs, offsets, fully_connected, sampling)
+            MCP_Geometric.__init__(self, costs, offsets=offsets, fully_connected=fully_connected, sampling=sampling)
             pos, neg = _gis_offset_edge_map(costs.shape, self.offsets)
             size = self.flat_costs.shape[0]
             self.flat_pos_edge_map = pos.reshape((self.dim, size), order='F')
             self.flat_neg_edge_map = neg.reshape((self.dim, size), order='F')
             self.use_start_cost = 0
-            print(pos)
-            print(neg)
-            print(self.flat_pos_edge_map)
