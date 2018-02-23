@@ -8,9 +8,11 @@ Installing pyamg and using the 'cg_mg' mode of random_walker improves
 significantly the performance.
 """
 
-import warnings
 import numpy as np
-from scipy import sparse, ndimage
+from scipy import sparse, ndimage as ndi
+
+from .._shared.utils import warn
+
 
 # executive summary for next code block: try to import umfpack from
 # scipy, but make sure not to raise a fuss if it fails since it's only
@@ -186,6 +188,20 @@ def _build_laplacian(data, spacing, mask=None, beta=50,
     return lap
 
 
+def _check_isolated_seeds(labels):
+    """
+    Prune isolated seed pixels to prevent labeling errors, and
+    return coordinates and label values of isolated seeds, so
+    that it is possible to put labels back in random walker output.
+    """
+    fill = ndi.binary_propagation(labels == 0, mask=(labels >= 0))
+    isolated = np.logical_and(labels > 0, np.logical_not(fill))
+    inds = np.nonzero(isolated)
+    values = labels[inds]
+    labels[inds] = -1
+    return inds, values
+
+
 #----------- Random walker algorithm --------------------------------
 
 
@@ -343,19 +359,22 @@ def random_walker(data, labels, beta=130, mode='bf', tol=1.e-3, copy=True,
             mode = 'cg'
         else:
             mode = 'bf'
+    elif mode not in ('cg_mg', 'cg', 'bf'):
+        raise ValueError("{mode} is not a valid mode. Valid modes are 'cg_mg',"
+                         " 'cg' and 'bf'".format(mode=mode))
 
     if UmfpackContext is None and mode == 'cg':
-        warnings.warn('"cg" mode will be used, but it may be slower than '
-                      '"bf" because SciPy was built without UMFPACK. Consider'
-                      ' rebuilding SciPy with UMFPACK; this will greatly '
-                      'accelerate the conjugate gradient ("cg") solver. '
-                      'You may also install pyamg and run the random_walker '
-                      'function in "cg_mg" mode (see docstring).')
+        warn('"cg" mode will be used, but it may be slower than '
+             '"bf" because SciPy was built without UMFPACK. Consider'
+             ' rebuilding SciPy with UMFPACK; this will greatly '
+             'accelerate the conjugate gradient ("cg") solver. '
+             'You may also install pyamg and run the random_walker '
+             'function in "cg_mg" mode (see docstring).')
 
     if (labels != 0).all():
-        warnings.warn('Random walker only segments unlabeled areas, where '
-                      'labels == 0. No zero valued areas in labels were '
-                      'found. Returning provided labels.')
+        warn('Random walker only segments unlabeled areas, where '
+             'labels == 0. No zero valued areas in labels were '
+             'found. Returning provided labels.')
 
         if return_full_prob:
             # Find and iterate over valid labels
@@ -408,6 +427,10 @@ def random_walker(data, labels, beta=130, mode='bf', tol=1.e-3, copy=True,
         labels = np.copy(labels)
     label_values = np.unique(labels)
 
+    # If some labeled pixels are isolated inside pruned zones, prune them
+    # as well and keep the labels for the final output
+    inds_isolated_seeds, isolated_values = _check_isolated_seeds(labels)
+
     # Reorder label values to have consecutive integers (no gaps)
     if np.any(np.diff(label_values) != 1):
         mask = labels >= 0
@@ -417,10 +440,12 @@ def random_walker(data, labels, beta=130, mode='bf', tol=1.e-3, copy=True,
     # If the array has pruned zones, be sure that no isolated pixels
     # exist between pruned zones (they could not be determined)
     if np.any(labels < 0):
-        filled = ndimage.binary_propagation(labels > 0, mask=labels >= 0)
+        filled = ndi.binary_propagation(labels > 0, mask=labels >= 0)
         labels[np.logical_and(np.logical_not(filled), labels == 0)] = -1
         del filled
     labels = np.atleast_3d(labels)
+
+
     if np.any(labels < 0):
         lap_sparse = _build_laplacian(data, spacing, mask=labels >= 0,
                                       beta=beta, multichannel=multichannel)
@@ -438,8 +463,7 @@ def random_walker(data, labels, beta=130, mode='bf', tol=1.e-3, copy=True,
                       return_full_prob=return_full_prob)
     if mode == 'cg_mg':
         if not amg_loaded:
-            warnings.warn(
-                """pyamg (http://pyamg.org/)) is needed to use
+            warn("""pyamg (http://pyamg.org/)) is needed to use
                 this mode, but is not installed. The 'cg' mode will be used
                 instead.""")
             X = _solve_cg(lap_sparse, B, tol=tol,
@@ -454,6 +478,9 @@ def random_walker(data, labels, beta=130, mode='bf', tol=1.e-3, copy=True,
     # Clean up results
     if return_full_prob:
         labels = labels.astype(np.float)
+        # Put back labels of isolated seeds
+        if len(isolated_values) > 0:
+            labels[inds_isolated_seeds] = isolated_values
         X = np.array([_clean_labels_ar(Xline, labels, copy=True).reshape(dims)
                       for Xline in X])
         for i in range(1, int(labels.max()) + 1):
@@ -462,6 +489,8 @@ def random_walker(data, labels, beta=130, mode='bf', tol=1.e-3, copy=True,
             X[i - 1, mask_i] = 1
     else:
         X = _clean_labels_ar(X + 1, labels).reshape(dims)
+        # Put back labels of isolated seeds
+        X[inds_isolated_seeds] = isolated_values
     return X
 
 

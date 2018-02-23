@@ -143,11 +143,11 @@ class ImageCollection(object):
     >>> import skimage.io as io
     >>> from skimage import data_dir
 
-    >>> coll = io.ImageCollection(data_dir + '/lena*.png')
+    >>> coll = io.ImageCollection(data_dir + '/chess*.png')
     >>> len(coll)
     2
     >>> coll[0].shape
-    (512, 512, 3)
+    (200, 200)
 
     >>> ic = io.ImageCollection('/tmp/work/*.png:/tmp/other/*.jpg')
 
@@ -157,8 +157,7 @@ class ImageCollection(object):
                  **load_func_kwargs):
         """Load and manage a collection of images."""
         if isinstance(load_pattern, six.string_types):
-            load_pattern = load_pattern.replace(os.pathsep, ':')
-            load_pattern = load_pattern.split(':')
+            load_pattern = load_pattern.split(os.pathsep)
             self._files = []
             for pattern in load_pattern:
                 self._files.extend(glob(pattern))
@@ -199,14 +198,14 @@ class ImageCollection(object):
         index = []
         for fname in self._files:
             if fname.lower().endswith(('.tiff', '.tif')):
-                img = TiffFile(fname)
-                index += [(fname, i) for i in range(len(img.pages))]
+                with open(fname, 'rb') as f:
+                    img = TiffFile(f)
+                    index += [(fname, i) for i in range(len(img.pages))]
             else:
                 try:
                     im = Image.open(fname)
                     im.seek(0)
                 except (IOError, OSError):
-                    index.append([fname, i])
                     continue
                 i = 0
                 while True:
@@ -255,10 +254,16 @@ class ImageCollection(object):
                 if self._frame_index:
                     fname, img_num = self._frame_index[n]
                     if img_num is not None:
-                        self.data[idx] = self.load_func(fname, img_num=img_num,
-                                                        **kwargs)
-                    else:
+                        kwargs['img_num'] = img_num
+                    try:
                         self.data[idx] = self.load_func(fname, **kwargs)
+                    # Account for functions that do not accept an img_num kwarg
+                    except TypeError as e:
+                        if "unexpected keyword argument 'img_num'" in str(e):
+                            del kwargs['img_num']
+                            self.data[idx] = self.load_func(fname, **kwargs)
+                        else:
+                            raise
                 else:
                     self.data[idx] = self.load_func(self.files[n], **kwargs)
                 self._cached = n

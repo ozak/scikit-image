@@ -1,8 +1,8 @@
 try:
     import networkx as nx
 except ImportError:
-    import warnings
-    warnings.warn('RAGs require networkx')
+    from ..._shared.utils import warn
+    warn('RAGs require networkx')
 import numpy as np
 from . import _ncut
 from . import _ncut_cy
@@ -55,7 +55,7 @@ def cut_threshold(labels, rag, thresh, in_place=True):
         rag = rag.copy()
 
     # Because deleting edges while iterating through them produces an error.
-    to_remove = [(x, y) for x, y, d in rag.edges_iter(data=True)
+    to_remove = [(x, y) for x, y, d in rag.edges(data=True)
                  if d['weight'] >= thresh]
     rag.remove_edges_from(to_remove)
 
@@ -111,7 +111,7 @@ def cut_normalized(labels, rag, thresh=0.001, num_cuts=10, in_place=True,
     >>> from skimage import data, segmentation
     >>> from skimage.future import graph
     >>> img = data.astronaut()
-    >>> labels = segmentation.slic(img, compactness=30, n_segments=400)
+    >>> labels = segmentation.slic(img)
     >>> rag = graph.rag_mean_color(img, labels, mode='similarity')
     >>> new_labels = graph.cut_normalized(labels, rag)
 
@@ -125,14 +125,14 @@ def cut_normalized(labels, rag, thresh=0.001, num_cuts=10, in_place=True,
     if not in_place:
         rag = rag.copy()
 
-    for node in rag.nodes_iter():
+    for node in rag.nodes():
         rag.add_edge(node, node, weight=max_edge)
 
     _ncut_relabel(rag, thresh, num_cuts)
 
     map_array = np.zeros(labels.max() + 1, dtype=labels.dtype)
     # Mapping from old labels to new
-    for n, d in rag.nodes_iter(data=True):
+    for n, d in rag.nodes(data=True):
         map_array[d['labels']] = d['ncut label']
 
     return map_array[labels]
@@ -195,10 +195,19 @@ def get_min_ncut(ev, d, w, num_cuts):
         The value of the minimum ncut.
     """
     mcut = np.inf
+    mn = ev.min()
+    mx = ev.max()
+
+    # If all values in `ev` are equal, it implies that the graph can't be
+    # further sub-divided. In this case the bi-partition is the the graph
+    # itself and an empty set.
+    min_mask = np.zeros_like(ev, dtype=np.bool)
+    if np.allclose(mn, mx):
+        return min_mask, mcut
 
     # Refer Shi & Malik 2001, Section 3.1.3, Page 892
     # Perform evenly spaced n-cuts and determine the optimal one.
-    for t in np.linspace(0, 1, num_cuts, endpoint=False):
+    for t in np.linspace(mn, mx, num_cuts, endpoint=False):
         mask = ev > t
         cost = _ncut.ncut_cost(mask, d, w)
         if cost < mcut:
@@ -220,9 +229,9 @@ def _label_all(rag, attr_name):
     attr_name : string
         The attribute to which a unique integer is assigned.
     """
-    node = rag.nodes()[0]
+    node = min(rag.nodes())
     new_label = rag.node[node]['labels'][0]
-    for n, d in rag.nodes_iter(data=True):
+    for n, d in rag.nodes(data=True):
         d[attr_name] = new_label
 
 
@@ -266,7 +275,7 @@ def _ncut_relabel(rag, thresh, num_cuts):
         # Refer Shi & Malik 2001, Section 3.2.3, Page 893
         vals, vectors = np.real(vals), np.real(vectors)
         index2 = _ncut_cy.argmin2(vals)
-        ev = _ncut.normalize(vectors[:, index2])
+        ev = vectors[:, index2]
 
         cut_mask, mcut = get_min_ncut(ev, d, w, num_cuts)
         if (mcut < thresh):

@@ -19,13 +19,17 @@ the normal, array-oriented image functions used by scikit-image.
     instead of row, column.
 
 
-Example
--------
+Examples
+--------
 We can create a Picture object open opening an image file:
 
 >>> from skimage import novice
 >>> from skimage import data
 >>> picture = novice.open(data.data_dir + '/chelsea.png')
+
+We can display pictures (after running this command, close the window to access the prompt again):
+
+>>> picture.show()  # doctest: +SKIP
 
 Pictures know their format:
 
@@ -44,16 +48,24 @@ True
 >>> picture.width
 451
 
+As a reminder, we can preview the picture with our earlier command:
+
+>>> picture.show()  # doctest: +SKIP
+
 Changing `size` resizes the picture.
 
 >>> picture.size = (45, 30)
+
+We can preview the changes we made to the picture with the ``compare`` command:
+
+>>> picture.compare()  # doctest: +SKIP
 
 You can iterate over pixels, which have RGB values between 0 and 255,
 and know their location in the picture.
 
 >>> for pixel in picture:
 ...     if (pixel.red > 128) and (pixel.x < picture.width):
-...         pixel.red /= 2
+...         pixel.red = pixel.red / 2
 
 Pictures know if they've been modified from the original file
 
@@ -76,8 +88,19 @@ True
 >>> picture.modified
 False
 
+An image can also be restored to its original state after modification:
+
+>>> picture[0:20, 0:20] = (0, 0, 0)
+>>> picture.compare()  # doctest: +SKIP
+>>> picture.reset()
+>>> picture.compare()  # doctest: +SKIP
+
 """
+import warnings
 from ._novice import Picture, open, colors, color_dict
 
+
+warnings.warn("The `skimage.novice` module was deprecated in version 0.14. "
+              "It will be removed in 0.16.")
 
 __all__ = ['Picture', 'open', 'colors', 'color_dict']

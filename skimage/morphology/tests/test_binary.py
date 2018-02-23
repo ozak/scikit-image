@@ -4,11 +4,12 @@ from numpy import testing
 from skimage import data, color
 from skimage.util import img_as_bool
 from skimage.morphology import binary, grey, selem
-from scipy import ndimage
+from scipy import ndimage as ndi
 
+import pytest
 
 img = color.rgb2gray(data.astronaut())
-bw_img = img > 100
+bw_img = img > 100 / 255.
 
 
 def test_non_square_image():
@@ -65,9 +66,13 @@ def test_out_argument():
         testing.assert_(np.any(out != out_saved))
         testing.assert_array_equal(out, func(img, strel))
 
-def test_default_selem():
-    functions = [binary.binary_erosion, binary.binary_dilation,
-                 binary.binary_opening, binary.binary_closing]
+
+binary_functions = [binary.binary_erosion, binary.binary_dilation,
+                    binary.binary_opening, binary.binary_closing]
+
+
+@pytest.mark.parametrize("function", binary_functions)
+def test_default_selem(function):
     strel = selem.diamond(radius=1)
     image = np.array([[0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                       [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -82,10 +87,9 @@ def test_default_selem():
                       [0, 0, 1, 1, 1, 1, 1, 1, 0, 0],
                       [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                       [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]], np.uint8)
-    for function in functions:
-        im_expected = function(image, strel)
-        im_test = function(image)
-        yield testing.assert_array_equal, im_expected, im_test
+    im_expected = function(image, strel)
+    im_test = function(image)
+    testing.assert_array_equal(im_expected, im_test)
 
 def test_3d_fallback_default_selem():
     # 3x3x3 cube inside a 7x7x7 image:
@@ -96,19 +100,23 @@ def test_3d_fallback_default_selem():
 
     # expect a "hyper-cross" centered in the 5x5x5:
     image_expected = np.zeros((7, 7, 7), dtype=bool)
-    image_expected[2:5, 2:5, 2:5] = ndimage.generate_binary_structure(3, 1)
+    image_expected[2:5, 2:5, 2:5] = ndi.generate_binary_structure(3, 1)
     testing.assert_array_equal(opened, image_expected)
 
-def test_3d_fallback_cube_selem():
+
+binary_3d_fallback_functions = [binary.binary_opening, binary.binary_closing]
+
+
+@pytest.mark.parametrize("function", binary_3d_fallback_functions)
+def test_3d_fallback_cube_selem(function):
     # 3x3x3 cube inside a 7x7x7 image:
     image = np.zeros((7, 7, 7), np.bool)
     image[2:-2, 2:-2, 2:-2] = 1
 
     cube = np.ones((3, 3, 3), dtype=np.uint8)
 
-    for function in [binary.binary_closing, binary.binary_opening]:
-        new_image = function(image, cube)
-        yield testing.assert_array_equal, new_image, image
+    new_image = function(image, cube)
+    testing.assert_array_equal(new_image, image)
 
 def test_2d_ndimage_equivalence():
     image = np.zeros((9, 9), np.uint16)
@@ -119,9 +127,9 @@ def test_2d_ndimage_equivalence():
     bin_opened = binary.binary_opening(image)
     bin_closed = binary.binary_closing(image)
 
-    selem = ndimage.generate_binary_structure(2, 1)
-    ndimage_opened = ndimage.binary_opening(image, structure=selem)
-    ndimage_closed = ndimage.binary_closing(image, structure=selem)
+    selem = ndi.generate_binary_structure(2, 1)
+    ndimage_opened = ndi.binary_opening(image, structure=selem)
+    ndimage_closed = ndi.binary_closing(image, structure=selem)
 
     testing.assert_array_equal(bin_opened, ndimage_opened)
     testing.assert_array_equal(bin_closed, ndimage_closed)

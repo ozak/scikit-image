@@ -6,13 +6,24 @@ import numpy as np
 cimport numpy as cnp
 from libc.math cimport sin, cos, abs
 from .._shared.interpolation cimport bilinear_interpolation, round
-
+from .._shared.transform cimport integrate
+import cython
 
 cdef extern from "numpy/npy_math.h":
     double NAN "NPY_NAN"
 
+ctypedef fused any_int:
+    cnp.uint8_t
+    cnp.uint16_t
+    cnp.uint32_t
+    cnp.uint64_t
+    cnp.int8_t
+    cnp.int16_t
+    cnp.int32_t
+    cnp.int64_t
 
-def _glcm_loop(cnp.uint8_t[:, ::1] image, double[:] distances,
+
+def _glcm_loop(any_int[:, ::1] image, double[:] distances,
                double[:] angles, Py_ssize_t levels,
                cnp.uint32_t[:, :, :, ::1] out):
     """Perform co-occurrence matrix accumulation.
@@ -20,15 +31,16 @@ def _glcm_loop(cnp.uint8_t[:, ::1] image, double[:] distances,
     Parameters
     ----------
     image : ndarray
-        Input image, which is converted to the uint8 data type.
+        Integer typed input image. Only positive valued images are supported.
+        If type is other than uint8, the argument `levels` needs to be set.
     distances : ndarray
         List of pixel pair distance offsets.
     angles : ndarray
         List of pixel pair angles in radians.
     levels : int
-        The input image should contain integers in [0, levels-1],
+        The input image should contain integers in [0, `levels`-1],
         where levels indicate the number of grey-levels counted
-        (typically 256 for an 8-bit image)
+        (typically 256 for an 8-bit image).
     out : ndarray
         On input a 4D array of zeros, and on output it contains
         the results of the GLCM computation.
@@ -37,7 +49,7 @@ def _glcm_loop(cnp.uint8_t[:, ::1] image, double[:] distances,
 
     cdef:
         Py_ssize_t a_idx, d_idx, r, c, rows, cols, row, col
-        cnp.uint8_t i, j
+        any_int i, j
         cnp.float64_t angle, distance
 
     with nogil:
@@ -264,3 +276,94 @@ def _local_binary_pattern(double[:, ::1] image,
                 output[r, c] = lbp
 
     return np.asarray(output)
+
+
+# Constant values that are used by `_multiblock_lbp` function.
+# Values represent offsets of neighbour rectangles relative to central one.
+# It has order starting from top left and going clockwise.
+cdef:
+    Py_ssize_t[::1] mlbp_r_offsets = np.asarray([-1, -1, -1, 0, 1, 1, 1, 0], dtype=np.intp)
+    Py_ssize_t[::1] mlbp_c_offsets = np.asarray([-1, 0, 1, 1, 1, 0, -1, -1], dtype=np.intp)
+
+
+def _multiblock_lbp(float[:, ::1] int_image,
+                    Py_ssize_t r,
+                    Py_ssize_t c,
+                    Py_ssize_t width,
+                    Py_ssize_t height):
+    """Multi-block local binary pattern (MB-LBP) [1]_.
+
+    Parameters
+    ----------
+    int_image : (N, M) float array
+        Integral image.
+    r : int
+        Row-coordinate of top left corner of a rectangle containing feature.
+    c : int
+        Column-coordinate of top left corner of a rectangle containing feature.
+    width : int
+        Width of one of 9 equal rectangles that will be used to compute
+        a feature.
+    height : int
+        Height of one of 9 equal rectangles that will be used to compute
+        a feature.
+
+    Returns
+    -------
+    output : int
+        8-bit MB-LBP feature descriptor.
+
+    References
+    ----------
+    .. [1] Face Detection Based on Multi-Block LBP
+           Representation. Lun Zhang, Rufeng Chu, Shiming Xiang, Shengcai Liao,
+           Stan Z. Li
+           http://www.cbsr.ia.ac.cn/users/scliao/papers/Zhang-ICB07-MBLBP.pdf
+    """
+
+    cdef:
+        # Top-left coordinates of central rectangle.
+        Py_ssize_t central_rect_r = r + height
+        Py_ssize_t central_rect_c = c + width
+
+        Py_ssize_t r_shift = height - 1
+        Py_ssize_t c_shift = width - 1
+
+        # Copy offset array to multiply it by width and height later.
+        Py_ssize_t[::1] r_offsets = mlbp_r_offsets.copy()
+        Py_ssize_t[::1] c_offsets = mlbp_c_offsets.copy()
+
+        Py_ssize_t current_rect_r, current_rect_c
+        Py_ssize_t element_num, i
+        double current_rect_val
+        int has_greater_value
+        int lbp_code = 0
+
+    # Pre-multiply offsets with width and height.
+    for i in range(8):
+        r_offsets[i] = r_offsets[i]*height
+        c_offsets[i] = c_offsets[i]*width
+
+    # Sum of intensity values of central rectangle.
+    cdef float central_rect_val = integrate(int_image, central_rect_r, central_rect_c,
+                                            central_rect_r + r_shift,
+                                            central_rect_c + c_shift)
+
+    for element_num in range(8):
+
+        current_rect_r = central_rect_r + r_offsets[element_num]
+        current_rect_c = central_rect_c + c_offsets[element_num]
+
+
+        current_rect_val = integrate(int_image, current_rect_r, current_rect_c,
+                                     current_rect_r + r_shift,
+                                     current_rect_c + c_shift)
+
+
+        has_greater_value = current_rect_val >= central_rect_val
+
+        # If current rectangle's intensity value is bigger
+        # make corresponding bit to 1.
+        lbp_code |= has_greater_value << (7 - element_num)
+
+    return lbp_code

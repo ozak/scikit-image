@@ -8,12 +8,8 @@ cimport numpy as cnp
 cimport cython
 
 from libc.math cimport abs, fabs, sqrt, ceil, atan2, M_PI
-from libc.stdlib cimport rand
 
 from ..draw import circle_perimeter
-
-cdef double PI_2 = 1.5707963267948966
-cdef double NEG_PI_2 = -PI_2
 
 from .._shared.interpolation cimport round
 
@@ -101,8 +97,8 @@ def _hough_circle(cnp.ndarray img,
     return acc
 
 
-def hough_ellipse(cnp.ndarray img, int threshold=4, double accuracy=1,
-                  int min_size=4, max_size=None):
+def _hough_ellipse(cnp.ndarray img, int threshold=4, double accuracy=1,
+                   int min_size=4, max_size=None):
     """Perform an elliptical Hough transform.
 
     Parameters
@@ -231,8 +227,8 @@ def hough_ellipse(cnp.ndarray img, int threshold=4, double accuracy=1,
                                     ('orientation', np.double)])
 
 
-def hough_line(cnp.ndarray img,
-               cnp.ndarray[ndim=1, dtype=cnp.double_t] theta=None):
+def _hough_line(cnp.ndarray img,
+                cnp.ndarray[ndim=1, dtype=cnp.double_t] theta):
     """Perform a straight line Hough transform.
 
     Parameters
@@ -241,7 +237,6 @@ def hough_line(cnp.ndarray img,
         Input image with nonzero values representing edges.
     theta : 1D ndarray of double
         Angles at which to compute the transform, in radians.
-        Defaults to -pi/2 .. pi/2
 
     Returns
     -------
@@ -278,15 +273,9 @@ def hough_line(cnp.ndarray img,
     .. plot:: hough_tf.py
 
     """
-    if img.ndim != 2:
-        raise ValueError('The input image must be 2D.')
-
     # Compute the array of angles and their sine and cosine
     cdef cnp.ndarray[ndim=1, dtype=cnp.double_t] ctheta
     cdef cnp.ndarray[ndim=1, dtype=cnp.double_t] stheta
-
-    if theta is None:
-        theta = np.linspace(NEG_PI_2, PI_2, 180)
 
     ctheta = np.cos(theta)
     stheta = np.sin(theta)
@@ -322,25 +311,28 @@ def hough_line(cnp.ndarray img,
     return accum, theta, bins
 
 
-def probabilistic_hough_line(cnp.ndarray img, int threshold=10,
-                             int line_length=50, int line_gap=10,
-                             cnp.ndarray[ndim=1, dtype=cnp.double_t] theta=None):
+def _probabilistic_hough_line(cnp.ndarray img, int threshold,
+                              int line_length, int line_gap,
+                              cnp.ndarray[ndim=1, dtype=cnp.double_t] theta,
+                              seed=None):
     """Return lines from a progressive probabilistic line Hough transform.
 
     Parameters
     ----------
     img : (M, N) ndarray
         Input image with nonzero values representing edges.
-    threshold : int, optional (default 10)
+    threshold : int
         Threshold
-    line_length : int, optional (default 50)
+    line_length : int
         Minimum accepted length of detected lines.
         Increase the parameter to extract longer lines.
-    line_gap : int, optional, (default 10)
+    line_gap : int
         Maximum gap between pixels to still form a line.
         Increase the parameter to merge broken lines more aggresively.
-    theta : 1D ndarray, dtype=double, optional, default (-pi/2 .. pi/2)
+    theta : 1D ndarray, dtype=double
         Angles at which to compute the transform, in radians.
+    seed : int, optional
+        Seed to initialize the random number generator.
 
     Returns
     -------
@@ -354,12 +346,6 @@ def probabilistic_hough_line(cnp.ndarray img, int threshold=10,
            Hough transform for line detection", in IEEE Computer Society
            Conference on Computer Vision and Pattern Recognition, 1999.
     """
-    if img.ndim != 2:
-        raise ValueError('The input image must be 2D.')
-
-    if theta is None:
-        theta = PI_2 - np.arange(180) / 180.0 * 2 * PI_2
-
     cdef Py_ssize_t height = img.shape[0]
     cdef Py_ssize_t width = img.shape[1]
 
@@ -395,6 +381,8 @@ def probabilistic_hough_line(cnp.ndarray img, int threshold=10,
     # mask all non-zero indexes
     mask[y_idxs, x_idxs] = 1
 
+    random_state = np.random.RandomState(seed)
+
     while 1:
 
         # quit if no remaining points
@@ -403,7 +391,7 @@ def probabilistic_hough_line(cnp.ndarray img, int threshold=10,
             break
 
         # select random non-zero point
-        index = rand() % count
+        index = random_state.randint(0, count)
         x = points[index][0]
         y = points[index][1]
         del points[index]
