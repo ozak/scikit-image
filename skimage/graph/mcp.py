@@ -2,7 +2,7 @@ from ._mcp import MCP, MCP_Geometric, MCP_Connect, MCP_Flexible, MCP_GIS
 
 
 def route_through_array(array, start, end, fully_connected=True,
-                        geometric=True):
+                        geometric=True, gis=False):
     """Simple example of how to use the MCP and MCP_Geometric classes.
 
     See the MCP and MCP_Geometric class documentation for explanation of the
@@ -22,6 +22,10 @@ def route_through_array(array, start, end, fully_connected=True,
         If True, the MCP_Geometric class is used to calculate costs, if False,
         the MCP base class is used. See the class documentation for
         an explanation of the differences between MCP and MCP_Geometric.
+    gis : bool (optional)
+        If True, the MCP_GIS class is used to calculate costs, if False,
+        the MCP base class or MCP_Geometric class are used. See the class documentation for
+        an explanation of the differences between MCP, MCP_Geometric and MCP_GIS.
 
     Returns
     -------
@@ -35,7 +39,7 @@ def route_through_array(array, start, end, fully_connected=True,
 
     See Also
     --------
-    MCP, MCP_Geometric
+    MCP, MCP_Geometric, MCP_GIS
 
     Examples
     --------
@@ -80,7 +84,9 @@ def route_through_array(array, start, end, fully_connected=True,
 
     """
     start, end = tuple(start), tuple(end)
-    if geometric:
+    if gis:
+        mcp_class = MCP_GIS
+    elif geometric:
         mcp_class = MCP_Geometric
     else:
         mcp_class = MCP

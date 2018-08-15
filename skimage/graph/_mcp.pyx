@@ -122,7 +122,7 @@ def _offset_edge_map(shape, offsets):
 @cython.wraparound(False)
 def _gis_offset_edge_map(shape, offsets):
     """Return an array with positions marked where offsets will step
-    out of bounds.
+    out of bounds. For GIS left and right side of matrix are connected.
 
     Given a shape (of length n) and a list of n-d offsets, return a two arrays
     of (n,) + shape: pos_edge_map and neg_edge_map.
@@ -134,7 +134,7 @@ def _gis_offset_edge_map(shape, offsets):
 
     An example will be explanatory:
     >>> offsets = [[-2,0], [1,1], [0,2]]
-    >>> pos_edge_map, neg_edge_map = _offset_edge_map((4,4), offsets)
+    >>> pos_edge_map, neg_edge_map = _gis_offset_edge_map((4,4), offsets)
     >>> neg_edge_map[0]
     array([[-1, -1, -1, -1],
           [-2, -2, -2, -2],
@@ -142,10 +142,10 @@ def _gis_offset_edge_map(shape, offsets):
           [ 0,  0,  0,  0]], dtype=int8)
 
     >>> pos_edge_map[1]
-    array([[0, 0, 2, 1],
-          [0, 0, 2, 1],
-          [0, 0, 2, 1],
-          [0, 0, 2, 1]], dtype=int8)
+    array([[0, 0, 0, 0],
+          [0, 0, 0, 0],
+          [0, 0, 0, 0],
+          [0, 0, 0, 0]], dtype=int8)
 
     """
     indices = np.indices(shape)  # indices.shape = (n,)+shape
@@ -328,7 +328,7 @@ cdef class MCP:
         See class documentation.
         """
         costs = np.asarray(costs)
-        costs[costs<=0] = np.inf
+        costs[costs<0] = np.inf
         if not np.can_cast(costs.dtype, FLOAT_D):
             raise TypeError('cannot cast costs array to ' + str(FLOAT_D))
 
@@ -1005,8 +1005,8 @@ cdef class MCP_GIS(MCP_Geometric):
         self.flat_pos_edge_map = pos.reshape((self.dim, size), order='F')
         self.flat_neg_edge_map = neg.reshape((self.dim, size), order='F')
         self.use_start_cost = 0
-
-    def find_costs(self, starts, ends=None, find_all_ends=True,
+'''
+    def find_costs_gis(self, starts, ends=None, find_all_ends=True,
                    max_coverage=1.0, max_cumulative_cost=None, max_cost=None):
         """
         Find the minimum-cost path from the given starting points.
@@ -1230,4 +1230,4 @@ cdef class MCP_GIS(MCP_Geometric):
         self.dirty = 1
         return cumulative_costs.copy(), traceback.copy()
 
-
+'''
