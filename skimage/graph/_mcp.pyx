@@ -328,7 +328,6 @@ cdef class MCP:
         See class documentation.
         """
         costs = np.asarray(costs)
-        costs[costs<0] = np.inf
         if not np.can_cast(costs.dtype, FLOAT_D):
             raise TypeError('cannot cast costs array to ' + str(FLOAT_D))
 
