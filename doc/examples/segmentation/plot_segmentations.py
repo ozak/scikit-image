@@ -82,7 +82,6 @@ more regularly shaped. [5]_
        Algorithms. ICPR 2014, pp 996-1001. DOI:10.1109/ICPR.2014.181
        https://www.tu-chemnitz.de/etit/proaut/forschung/rsrc/cws_pSLIC_ICPR.pdf
 """
-from __future__ import print_function
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -106,8 +105,7 @@ print("Felzenszwalb number of segments: {}".format(len(np.unique(segments_fz))))
 print('SLIC number of segments: {}'.format(len(np.unique(segments_slic))))
 print('Quickshift number of segments: {}'.format(len(np.unique(segments_quick))))
 
-fig, ax = plt.subplots(2, 2, figsize=(10, 10), sharex=True, sharey=True,
-                       subplot_kw={'adjustable': 'box-forced'})
+fig, ax = plt.subplots(2, 2, figsize=(10, 10), sharex=True, sharey=True)
 
 ax[0, 0].imshow(mark_boundaries(img, segments_fz))
 ax[0, 0].set_title("Felzenszwalbs's method")

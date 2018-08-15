@@ -1,8 +1,7 @@
-from __future__ import division
 from collections import namedtuple
 import numpy as np
-import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+import matplotlib.image
 from ...util import dtype as dtypes
 from ...exposure import is_low_contrast
 from ...util.colormap import viridis
@@ -147,6 +146,7 @@ def imshow(image, ax=None, show_cbar=None, **kwargs):
     ax_im : `matplotlib.pyplot.AxesImage`
         The `AxesImage` object returned by `plt.imshow`.
     """
+    import matplotlib.pyplot as plt
     if kwargs.get('cmap', None) == 'viridis':
         kwargs['cmap'] = viridis
     lo, hi, cmap = _get_display_range(image)
@@ -162,7 +162,6 @@ def imshow(image, ax=None, show_cbar=None, **kwargs):
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="5%", pad=0.05)
         plt.colorbar(ax_im, cax=cax)
-    ax.set_adjustable('box-forced')
     ax.get_figure().tight_layout()
 
     return ax_im
@@ -176,6 +175,8 @@ def imshow_collection(ic, *args, **kwargs):
     fig : `matplotlib.figure.Figure`
         The `Figure` object returned by `plt.subplots`.
     """
+    import matplotlib.pyplot as plt
+
     if len(ic) < 1:
         raise ValueError('Number of images to plot must be greater than 0')
 
@@ -201,9 +202,9 @@ def imshow_collection(ic, *args, **kwargs):
     return fig
 
 
-imread = plt.imread
-show = plt.show
+imread = matplotlib.image.imread
 
 
 def _app_show():
+    from matplotlib.pyplot import show
     show()
